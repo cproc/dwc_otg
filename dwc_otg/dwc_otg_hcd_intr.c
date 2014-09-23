@@ -40,6 +40,8 @@
 #include <asm/fiq.h>
 #endif
 
+#include "sof_trigger.h"
+
 extern bool microframe_schedule;
 
 /** @file
@@ -346,6 +348,8 @@ int32_t dwc_otg_hcd_handle_sof_intr(dwc_otg_hcd_t * hcd)
 	}
 	if (fiq_enable)
 		hcd->fiq_state->next_sched_frame = next_sched_frame;
+
+	schedule_sof_interrupt(hcd, next_sched_frame);
 
 	tr_type = dwc_otg_hcd_select_transactions(hcd);
 	if (tr_type != DWC_OTG_TRANSACTION_NONE) {
