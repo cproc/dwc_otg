@@ -192,7 +192,7 @@ dwc_otg_core_if_t *dwc_otg_cil_init(const uint32_t * reg_base_addr)
 		core_if->hptxfsiz.d32 =
 		DWC_READ_REG32(&core_if->core_global_regs->hptxfsiz);
 		gusbcfg.d32 =  DWC_READ_REG32(&core_if->core_global_regs->gusbcfg);
-		gusbcfg.b.force_host_mode = 0;
+		gusbcfg.b.force_host_mode = 1;
 		DWC_WRITE_REG32(&core_if->core_global_regs->gusbcfg, gusbcfg.d32);
 		dwc_mdelay(100);
 	}
@@ -2244,9 +2244,7 @@ void dwc_otg_core_host_init(dwc_otg_core_if_t * core_if)
  */
 void dwc_otg_hc_init(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 {
-	uint32_t intr_enable;
 	hcintmsk_data_t hc_intr_mask;
-	gintmsk_data_t gintmsk = {.d32 = 0 };
 	hcchar_data_t hcchar;
 	hcsplt_data_t hcsplt;
 
@@ -2347,14 +2345,6 @@ void dwc_otg_hc_init(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 		}
 	}
 	DWC_WRITE_REG32(&hc_regs->hcintmsk, hc_intr_mask.d32);
-
-	/* Enable the top level host channel interrupt. */
-	intr_enable = (1 << hc_num);
-	DWC_MODIFY_REG32(&host_if->host_global_regs->haintmsk, 0, intr_enable);
-
-	/* Make sure host channel interrupts are enabled. */
-	gintmsk.b.hcintr = 1;
-	DWC_MODIFY_REG32(&core_if->core_global_regs->gintmsk, 0, gintmsk.d32);
 
 	/*
 	 * Program the HCCHARn register with the endpoint characteristics for
