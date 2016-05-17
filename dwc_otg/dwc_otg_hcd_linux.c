@@ -936,6 +936,12 @@ static void endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 	dwc_otg_hcd_t *dwc_otg_hcd = hcd_to_dwc_otg_hcd(hcd);
         struct device *dev = DWC_OTG_OS_GETDEV(dwc_otg_hcd->otg_dev->os_dep);
 
+	/*
+	 * This is wrong, since 'dev' is a member of platform_device not usb_device
+	 * (see DWC_OTG_OS_GETDEV), therefore the pointer will be bugos and point to
+	 * some location before the platform device. Don't use this pointer in
+	 * usb_settoggle below.
+	 */
 	if (dev)
 		udev = to_usb_device(dev);
 	else
@@ -944,7 +950,7 @@ static void endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 	DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD EP RESET: Endpoint Num=0x%02d\n", epnum);
 
 	DWC_SPINLOCK_IRQSAVE(dwc_otg_hcd->lock, &flags);
-	usb_settoggle(udev, epnum, is_out, 0);
+	//usb_settoggle(udev, epnum, is_out, 0);
 	if (is_control)
 		usb_settoggle(udev, epnum, !is_out, 0);
 
