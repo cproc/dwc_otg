@@ -337,27 +337,12 @@ void DWC_DMA_POOL_FREE(dwc_pool_t *pool, void *vaddr, void *daddr)
 
 void *__DWC_DMA_ALLOC(void *dma_ctx, uint32_t size, dwc_dma_t *dma_addr)
 {
-#ifdef xxCOSIM /* Only works for 32-bit cosim */
-	void *buf = dma_alloc_coherent(dma_ctx, (size_t)size, dma_addr, GFP_KERNEL);
-#else
-	void *buf = dma_alloc_coherent(dma_ctx, (size_t)size, dma_addr, GFP_KERNEL | GFP_DMA32);
-#endif
-	if (!buf) {
-		return NULL;
-	}
-
-	memset(buf, 0, (size_t)size);
-	return buf;
+	return dma_zalloc_coherent(dma_ctx, size, dma_addr, GFP_KERNEL | GFP_DMA32);
 }
 
 void *__DWC_DMA_ALLOC_ATOMIC(void *dma_ctx, uint32_t size, dwc_dma_t *dma_addr)
 {
-	void *buf = dma_alloc_coherent(NULL, (size_t)size, dma_addr, GFP_ATOMIC);
-	if (!buf) {
-		return NULL;
-	}
-	memset(buf, 0, (size_t)size);
-	return buf;
+	return dma_zalloc_coherent(dma_ctx, size, dma_addr, GFP_ATOMIC);
 }
 
 void __DWC_DMA_FREE(void *dma_ctx, uint32_t size, void *virt_addr, dwc_dma_t dma_addr)
@@ -719,7 +704,7 @@ uint32_t DWC_TIME(void)
 /* Timers */
 
 struct dwc_timer {
-	struct timer_list *t;
+	struct timer_list t;
 	char *name;
 	dwc_timer_callback_t cb;
 	void *data;
@@ -727,9 +712,9 @@ struct dwc_timer {
 	dwc_spinlock_t *lock;
 };
 
-static void timer_callback(unsigned long data)
+static void timer_callback(struct timer_list *tt)
 {
-	dwc_timer_t *timer = (dwc_timer_t *)data;
+	dwc_timer_t *timer = from_timer(timer, tt, t);
 	dwc_irqflags_t flags;
 
 	DWC_SPINLOCK_IRQSAVE(timer->lock, &flags);
@@ -746,12 +731,6 @@ dwc_timer_t *DWC_TIMER_ALLOC(char *name, dwc_timer_callback_t cb, void *data)
 	if (!t) {
 		DWC_ERROR("Cannot allocate memory for timer");
 		return NULL;
-	}
-
-	t->t = DWC_ALLOC(sizeof(*t->t));
-	if (!t->t) {
-		DWC_ERROR("Cannot allocate memory for timer->t");
-		goto no_timer;
 	}
 
 	t->name = DWC_STRDUP(name);
@@ -771,8 +750,8 @@ dwc_timer_t *DWC_TIMER_ALLOC(char *name, dwc_timer_callback_t cb, void *data)
 	}
 
 	t->scheduled = 0;
-	t->t->expires = jiffies;
-	setup_timer(t->t, timer_callback, (unsigned long)t);
+	t->t.expires = jiffies;
+	timer_setup(&t->t, timer_callback, 0);
 
 	t->cb = cb;
 	t->data = data;
@@ -782,8 +761,6 @@ dwc_timer_t *DWC_TIMER_ALLOC(char *name, dwc_timer_callback_t cb, void *data)
  no_lock:
 	DWC_FREE(t->name);
  no_name:
-	DWC_FREE(t->t);
- no_timer:
 	DWC_FREE(t);
 	return NULL;
 }
@@ -795,13 +772,12 @@ void DWC_TIMER_FREE(dwc_timer_t *timer)
 	DWC_SPINLOCK_IRQSAVE(timer->lock, &flags);
 
 	if (timer->scheduled) {
-		del_timer(timer->t);
+		del_timer(&timer->t);
 		timer->scheduled = 0;
 	}
 
 	DWC_SPINUNLOCK_IRQRESTORE(timer->lock, flags);
 	DWC_SPINLOCK_FREE(timer->lock);
-	DWC_FREE(timer->t);
 	DWC_FREE(timer->name);
 	DWC_FREE(timer);
 }
@@ -815,11 +791,11 @@ void DWC_TIMER_SCHEDULE(dwc_timer_t *timer, uint32_t time)
 	if (!timer->scheduled) {
 		timer->scheduled = 1;
 		DWC_DEBUGC("Scheduling timer %s to expire in +%d msec", timer->name, time);
-		timer->t->expires = jiffies + msecs_to_jiffies(time);
-		add_timer(timer->t);
+		timer->t.expires = jiffies + msecs_to_jiffies(time);
+		add_timer(&timer->t);
 	} else {
 		DWC_DEBUGC("Modifying timer %s to expire in +%d msec", timer->name, time);
-		mod_timer(timer->t, jiffies + msecs_to_jiffies(time));
+		mod_timer(&timer->t, jiffies + msecs_to_jiffies(time));
 	}
 
 	DWC_SPINUNLOCK_IRQRESTORE(timer->lock, flags);
@@ -827,7 +803,7 @@ void DWC_TIMER_SCHEDULE(dwc_timer_t *timer, uint32_t time)
 
 void DWC_TIMER_CANCEL(dwc_timer_t *timer)
 {
-	del_timer(timer->t);
+	del_timer(&timer->t);
 }
 
 

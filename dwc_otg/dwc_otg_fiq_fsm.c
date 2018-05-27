@@ -74,17 +74,31 @@ void notrace _fiq_print(enum fiq_debug_level dbg_lvl, volatile struct fiq_state 
 	}
 }
 
+
+#ifdef CONFIG_ARM64
+
+inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
+{
+	spin_lock((spinlock_t *)lock);
+}
+
+inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
+{
+	spin_unlock((spinlock_t *)lock);
+}
+
+#else
+
 /**
  * fiq_fsm_spin_lock() - ARMv6+ bare bones spinlock
  * Must be called with local interrupts and FIQ disabled.
  */
-#if defined(CONFIG_ARCH_BCM2709) && defined(CONFIG_SMP)
+#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
 inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
 {
 	unsigned long tmp;
 	uint32_t newval;
 	fiq_lock_t lockval;
-	smp_mb__before_spinlock();
 	/* Nested locking, yay. If we are on the same CPU as the fiq, then the disable
 	 * will be sufficient. If we are on a different CPU, then the lock protects us. */
 	prefetchw(&lock->slock);
@@ -100,7 +114,7 @@ inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
 
 	while (lockval.tickets.next != lockval.tickets.owner) {
 		wfe();
-		lockval.tickets.owner = ACCESS_ONCE(lock->tickets.owner);
+		lockval.tickets.owner = READ_ONCE(lock->tickets.owner);
 	}
 	smp_mb();
 }
@@ -111,7 +125,7 @@ inline void fiq_fsm_spin_lock(fiq_lock_t *lock) { }
 /**
  * fiq_fsm_spin_unlock() - ARMv6+ bare bones spinunlock
  */
-#if defined(CONFIG_ARCH_BCM2709) && defined(CONFIG_SMP)
+#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
 inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
 {
 	smp_mb();
@@ -120,6 +134,8 @@ inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
 }
 #else
 inline void fiq_fsm_spin_unlock(fiq_lock_t *lock) { }
+#endif
+
 #endif
 
 /**
@@ -174,6 +190,32 @@ static void notrace fiq_fsm_setup_csplit(struct fiq_state *st, int n)
 	mb();
 }
 
+/**
+ * fiq_fsm_restart_np_pending() - Restart a single non-periodic contended transfer
+ * @st: Pointer to the channel's state
+ * @num_channels: Total number of host channels
+ * @orig_channel: Channel index of completed transfer
+ *
+ * In the case where an IN and OUT transfer are simultaneously scheduled to the
+ * same device/EP, inadequate hub implementations will misbehave. Once the first
+ * transfer is complete, a pending non-periodic split can then be issued.
+ */
+static void notrace fiq_fsm_restart_np_pending(struct fiq_state *st, int num_channels, int orig_channel)
+{
+	int i;
+	int dev_addr = st->channel[orig_channel].hcchar_copy.b.devaddr;
+	int ep_num = st->channel[orig_channel].hcchar_copy.b.epnum;
+	for (i = 0; i < num_channels; i++) {
+		if (st->channel[i].fsm == FIQ_NP_SSPLIT_PENDING &&
+			st->channel[i].hcchar_copy.b.devaddr == dev_addr &&
+			st->channel[i].hcchar_copy.b.epnum == ep_num) {
+			st->channel[i].fsm = FIQ_NP_SSPLIT_STARTED;
+			fiq_fsm_restart_channel(st, i, 0);
+			break;
+		}
+	}
+}
+
 static inline int notrace fiq_get_xfer_len(struct fiq_state *st, int n)
 {
 	/* The xfersize register is a bit wonky. For IN transfers, it decrements by the packet size. */
@@ -222,6 +264,15 @@ static void notrace fiq_fsm_reload_hctsiz(struct fiq_state *st, int n)
 	hctsiz.b.xfersize = st->channel[n].hctsiz_copy.b.xfersize;
 	hctsiz.b.pktcnt = 1;
 	FIQ_WRITE(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCTSIZ, hctsiz.d32);
+}
+
+/**
+ * fiq_fsm_reload_hcdma() - for OUT transactions, rewind DMA pointer
+ */
+static void notrace fiq_fsm_reload_hcdma(struct fiq_state *st, int n)
+{
+	hcdma_data_t hcdma = st->channel[n].hcdma_copy;
+	FIQ_WRITE(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HC_DMA, hcdma.d32);
 }
 
 /**
@@ -474,7 +525,10 @@ static void notrace noinline fiq_fsm_start_next_periodic(struct fiq_state *st, i
 		if (st->channel[n].fsm == FIQ_PER_ISO_OUT_PENDING) {
 			if (!fiq_fsm_tt_in_use(st, num_channels, n)) {
 				fiq_print(FIQDBG_INT, st, "NEXTISO ");
-				st->channel[n].fsm = FIQ_PER_ISO_OUT_ACTIVE;
+				if (st->channel[n].nrpackets == 1)
+					st->channel[n].fsm = FIQ_PER_ISO_OUT_LAST;
+				else
+					st->channel[n].fsm = FIQ_PER_ISO_OUT_ACTIVE;
 				fiq_fsm_restart_channel(st, n, 0);
 				break;
 			}
@@ -537,8 +591,8 @@ static int notrace noinline fiq_fsm_update_hs_isoc(struct fiq_state *state, int 
 		}
 
 	} else {
-		switch (st->hcchar_copy.b.multicnt) {
 		st->hctsiz_copy.b.xfersize = nrpackets * st->hcchar_copy.b.mps;
+		switch (st->hcchar_copy.b.multicnt) {
 		case 1:
 			st->hctsiz_copy.b.pid = DWC_PID_DATA0;
 			break;
@@ -782,11 +836,14 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 			fiq_fsm_setup_csplit(state, n);
 		} else if (hcint.b.nak) {
 			// No buffer space in TT. Retry on a uframe boundary.
+			fiq_fsm_reload_hcdma(state, n);
 			st->fsm = FIQ_NP_SSPLIT_RETRY;
 			handled = 1;
 		} else if (hcint.b.xacterr) {
 			// The only other one we care about is xacterr. This implies HS bus error - retry.
 			st->nr_errors++;
+			if(st->hcchar_copy.b.epdir == 0)
+				fiq_fsm_reload_hcdma(state, n);
 			st->fsm = FIQ_NP_SSPLIT_RETRY;
 			if (st->nr_errors >= 3) {
 				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
@@ -850,6 +907,9 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
 			}
 		}
+		if (st->fsm != FIQ_NP_IN_CSPLIT_RETRY) {
+			fiq_fsm_restart_np_pending(state, num_channels, n);
+		}
 		break;
 
 	case FIQ_NP_OUT_CSPLIT_RETRY:
@@ -898,6 +958,9 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 				// Something unexpected happened. AHBerror or babble perhaps. Let the IRQ deal with it.
 				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
 			}
+		}
+		if (st->fsm != FIQ_NP_OUT_CSPLIT_RETRY) {
+			fiq_fsm_restart_np_pending(state, num_channels, n);
 		}
 		break;
 
