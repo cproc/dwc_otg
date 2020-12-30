@@ -1138,6 +1138,7 @@ static void complete_non_periodic_xfer(dwc_otg_hcd_t * hcd,
 	hcint_data_t hcint;
 
 	qtd->error_count = 0;
+	qtd->csplit_retry_count = 0;
 
 	hcint.d32 = DWC_READ_REG32(&hc_regs->hcint);
 	if (hcint.b.nyet) {
@@ -1189,6 +1190,7 @@ static void complete_periodic_xfer(dwc_otg_hcd_t * hcd,
 {
 	hctsiz_data_t hctsiz;
 	qtd->error_count = 0;
+	qtd->csplit_retry_count = 0;
 
 	hctsiz.d32 = DWC_READ_REG32(&hc_regs->hctsiz);
 	if (!hc->ep_is_in || hctsiz.b.pktcnt == 0) {
@@ -1499,6 +1501,7 @@ static int32_t handle_hc_nak_intr(dwc_otg_hcd_t * hcd,
 	if (hc->do_split) {
 		if (hc->complete_split) {
 			qtd->error_count = 0;
+			qtd->csplit_retry_count = 0;
 		}
 		qtd->complete_split = 0;
 		halt_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_NAK);
@@ -1520,6 +1523,7 @@ static int32_t handle_hc_nak_intr(dwc_otg_hcd_t * hcd,
 			disable_hc_int(hc_regs, datatglerr);
 			disable_hc_int(hc_regs, ack);
 			qtd->error_count = 0;
+			qtd->csplit_retry_count = 0;
 			goto handle_nak_done;
 		}
 
@@ -1529,6 +1533,7 @@ static int32_t handle_hc_nak_intr(dwc_otg_hcd_t * hcd,
 		 * queued as request queue space is available.
 		 */
 		qtd->error_count = 0;
+		qtd->csplit_retry_count = 0;
 
 		if (!hc->qh->ping_state) {
 			update_urb_state_xfer_intr(hc, hc_regs,
@@ -1549,6 +1554,7 @@ static int32_t handle_hc_nak_intr(dwc_otg_hcd_t * hcd,
 		break;
 	case UE_INTERRUPT:
 		qtd->error_count = 0;
+		qtd->csplit_retry_count = 0;
 		halt_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_NAK);
 		break;
 	case UE_ISOCHRONOUS:
@@ -1640,6 +1646,7 @@ static int32_t handle_hc_ack_intr(dwc_otg_hcd_t * hcd,
 			disable_hc_int(hc_regs, nak);
 		}
 		qtd->error_count = 0;
+		qtd->csplit_retry_count = 0;
 
 		if (hc->qh->ping_state) {
 			hc->qh->ping_state = 0;
@@ -1699,6 +1706,7 @@ static int32_t handle_hc_nyet_intr(dwc_otg_hcd_t * hcd,
 
 		if (hc->ep_type == DWC_OTG_EP_TYPE_INTR ||
 		    hc->ep_type == DWC_OTG_EP_TYPE_ISOC) {
+#if 0
 			int frnum = dwc_otg_hcd_get_frame_number(hcd);
 
 			// With the FIQ running we only ever see the failed NYET
@@ -1709,6 +1717,27 @@ static int32_t handle_hc_nyet_intr(dwc_otg_hcd_t * hcd,
 				 * No longer in the same full speed frame.
 				 * Treat this as a transaction error.
 				 */
+#else
+			/*
+			 * The frame number comparison above is an unreliable error
+			 * indicator on Genode, because 'sched_frame' does not
+			 * always reflect the frame number when the transaction was
+			 * actually submitted to the host controller. If the
+			 * 'start-split' transaction is scheduled on microframe 7
+			 * (range 0..7) and submitted to the host controller in
+			 * microframe 7 of a later full frame, the
+			 * 'dwc_otg_hcd_qh_deactivate()' function does not ensure
+			 * the minimum delay of 1 microframe between 'start-split'
+			 * and 'complete-split' anymore and both transactions might
+			 * be submitted in the same microframe. If this causes a
+			 * NYET response in the next microframe (0), the frame
+			 * number comparison above would come to the conclusion
+			 * that a retry would already be too late. So, we use a
+			 * retry counter instead.
+			 */
+			if (qtd->csplit_retry_count == 2) {
+#endif
+
 #if 0
 				/** @todo Fix system performance so this can
 				 * be treated as an error. Right now complete
@@ -1726,12 +1755,15 @@ static int32_t handle_hc_nyet_intr(dwc_otg_hcd_t * hcd,
 			}
 		}
 
+		qtd->csplit_retry_count++;
+
 		halt_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_NYET);
 		goto handle_nyet_done;
 	}
 
 	hc->qh->ping_state = 1;
 	qtd->error_count = 0;
+	qtd->csplit_retry_count = 0;
 
 	update_urb_state_xfer_intr(hc, hc_regs, qtd->urb, qtd,
 				   DWC_OTG_HC_XFER_NYET);
@@ -2013,6 +2045,7 @@ static int32_t handle_hc_datatglerr_intr(dwc_otg_hcd_t * hcd,
 			disable_hc_int(hc_regs, nak);
 		}
 		qtd->error_count = 0;
+		qtd->csplit_retry_count = 0;
 	}
 
 	disable_hc_int(hc_regs, datatglerr);
@@ -2146,6 +2179,7 @@ static void handle_hc_chhltd_intr_dma(dwc_otg_hcd_t * hcd,
 			if (hcint.b.nyet || hcint.b.nak || hcint.b.ack) {
 				DWC_DEBUGPL(DBG_HCD, "XactErr with NYET/NAK/ACK\n");
 				qtd->error_count = 0;
+				qtd->csplit_retry_count = 0;
 			} else {
 				DWC_DEBUGPL(DBG_HCD, "XactErr without NYET/NAK/ACK\n");
 			}
@@ -2690,6 +2724,7 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 				fiq_print(FIQDBG_ERR, dwc_otg_hcd->fiq_state, "HCDERR%02d", num);
 				if (!dwc_otg_hcd->fiq_state->channel[num].nr_errors) {
 					qtd->error_count = 0;
+					qtd->csplit_retry_count = 0;
 					fiq_print(FIQDBG_ERR, dwc_otg_hcd->fiq_state, "RESET   ");
 				}
 				break;

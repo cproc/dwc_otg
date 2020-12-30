@@ -219,6 +219,11 @@ typedef struct dwc_otg_qtd {
 	uint8_t error_count;
 
 	/**
+	 * Number of attempted CSPLIT retries after NYET response
+	 */
+	uint8_t csplit_retry_count;
+
+	/**
 	 * Index of the next frame descriptor for an isochronous transfer. A
 	 * frame descriptor describes the buffer position and length of the
 	 * data to be transferred in the next scheduled (micro)frame of an
