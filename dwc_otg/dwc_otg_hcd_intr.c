@@ -42,6 +42,14 @@
 
 #include "sof_trigger.h"
 
+/* XXX: adapt to test board: rpi1b+: 4, rpi3b+: 4 or 5 */
+static const unsigned int hid_dev_addr = 4;
+
+static unsigned int xfercomp_count = 0;
+static unsigned int nyet_error_count = 0;
+static unsigned int ack_intr_core_frame = 0;
+static unsigned int ack_intr_driver_frame = 0;
+
 extern bool microframe_schedule;
 
 /** @file
@@ -1257,6 +1265,48 @@ static int32_t handle_hc_xfercomp_intr(dwc_otg_hcd_t * hcd,
 	dwc_otg_hcd_urb_t *urb = qtd->urb;
 	int pipe_type = dwc_otg_hcd_get_pipe_type(&urb->pipe_info);
 
+#if 1
+if ((hc->dev_addr == hid_dev_addr) && (hc->ep_num == 1)) {
+
+	unsigned int xfercomp_intr_driver_frame = dwc_otg_hcd_get_frame_number(hcd);
+	unsigned int xfercomp_intr_core_frame = scheduled_sof_frame(hcd);
+
+	unsigned int ssplit_csplit_diff = ((unsigned int)hc->qh->sched_frame - hc->qh->start_split_frame) % 0x4000;
+	unsigned int ssplit_csplit_measured_diff = ((unsigned int)hc->qh->sched_frame_measured - hc->qh->start_split_frame_measured) % 0x4000;
+	unsigned int ssplit_csplit_measured2_diff = ((unsigned int)hc->qh->sched_frame_measured2 - hc->qh->start_split_frame_measured2) % 0x4000;
+
+	/*
+	 * In the good case, the last printed count should be #1002/1002:
+	 * - 1 initial 'no key pressed' report, then 'nak' for ~5s
+	 * - 1000 'key press' reports (0..9, release of previous key implied)
+	 * - 1 final 'no key pressed' report
+	 *
+	 * The test program should report 2000 press/release events
+	 * (#0..#1999)
+	 */
+
+	xfercomp_count++;
+
+	lx_printf("xfercomp: ss: %5u/%5u/%5u, ack: %5u/%5u, cs: %5u/%5u/%5u, xfercomp: %5u/%5u, cs-ss: %2u/%2u/%2u, retries: %u, #%4u/%4u\n",
+	          hc->qh->start_split_frame,
+	          hc->qh->start_split_frame_measured,
+	          hc->qh->start_split_frame_measured2,
+	          ack_intr_core_frame,
+	          ack_intr_driver_frame,
+	          hc->qh->sched_frame,
+	          hc->qh->sched_frame_measured,
+	          hc->qh->sched_frame_measured2,
+	          xfercomp_intr_core_frame,
+	          xfercomp_intr_driver_frame,
+	          ssplit_csplit_diff,
+	          ssplit_csplit_measured_diff,
+	          ssplit_csplit_measured2_diff,
+	          qtd->csplit_retry_count,
+	          xfercomp_count,
+	          xfercomp_count + nyet_error_count);
+}
+#endif
+
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "Transfer Complete--\n", hc->hc_num);
 
@@ -1483,6 +1533,34 @@ static int32_t handle_hc_nak_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "NAK Received--\n", hc->hc_num);
 
+#if 1
+if ((hc->dev_addr == hid_dev_addr) && (hc->ep_num == 1)) {
+
+	unsigned int nak_intr_driver_frame = dwc_otg_hcd_get_frame_number(hcd);
+	unsigned int nak_intr_core_frame = scheduled_sof_frame(hcd);
+
+	unsigned int ssplit_csplit_diff = ((unsigned int)hc->qh->sched_frame - hc->qh->start_split_frame) % 0x4000;
+	unsigned int ssplit_csplit_measured_diff = ((unsigned int)hc->qh->sched_frame_measured - hc->qh->start_split_frame_measured) % 0x4000;
+	unsigned int ssplit_csplit_measured2_diff = ((unsigned int)hc->qh->sched_frame_measured2 - hc->qh->start_split_frame_measured2) % 0x4000;
+
+	lx_printf("nak: ss: %5u/%5u/%5u, ack: %5u/%5u, cs: %5u/%5u/%5u, nak: %5u/%5u, cs-ss: %2u/%2u/%2u, retries: %u\n",
+	          hc->qh->start_split_frame,
+	          hc->qh->start_split_frame_measured,
+	          hc->qh->start_split_frame_measured2,
+	          ack_intr_core_frame,
+	          ack_intr_driver_frame,
+	          hc->qh->sched_frame,
+	          hc->qh->sched_frame_measured,
+	          hc->qh->sched_frame_measured2,
+	          nak_intr_core_frame,
+	          nak_intr_driver_frame,
+	          ssplit_csplit_diff,
+	          ssplit_csplit_measured_diff,
+	          ssplit_csplit_measured2_diff,
+	          qtd->csplit_retry_count);
+}
+#endif
+
 	/*
 	 * When we get bulk NAKs then remember this so we holdoff on this qh until
 	 * the beginning of the next frame
@@ -1583,6 +1661,14 @@ static int32_t handle_hc_ack_intr(dwc_otg_hcd_t * hcd,
 		    "ACK Received--\n", hc->hc_num);
 
 	if (hc->do_split) {
+
+#if 1
+if ((hc->dev_addr == hid_dev_addr) && (hc->ep_num == 1)) {
+	ack_intr_driver_frame = dwc_otg_hcd_get_frame_number(hcd);
+	ack_intr_core_frame = scheduled_sof_frame(hcd);
+}
+#endif
+
 		/*
 		 * Handle ACK on SSPLIT.
 		 * ACK should not occur in CSPLIT.
@@ -1706,6 +1792,34 @@ static int32_t handle_hc_nyet_intr(dwc_otg_hcd_t * hcd,
 
 		if (hc->ep_type == DWC_OTG_EP_TYPE_INTR ||
 		    hc->ep_type == DWC_OTG_EP_TYPE_ISOC) {
+#if 1
+if ((hc->dev_addr == hid_dev_addr) && (hc->ep_num == 1)) {
+
+	unsigned int nyet_intr_driver_frame = dwc_otg_hcd_get_frame_number(hcd);
+	unsigned int nyet_intr_core_frame = scheduled_sof_frame(hcd);
+
+	unsigned int ssplit_csplit_diff = ((unsigned int)hc->qh->sched_frame - hc->qh->start_split_frame) % 0x4000;
+	unsigned int ssplit_csplit_measured_diff = ((unsigned int)hc->qh->sched_frame_measured - hc->qh->start_split_frame_measured) % 0x4000;
+	unsigned int ssplit_csplit_measured2_diff = ((unsigned int)hc->qh->sched_frame_measured2 - hc->qh->start_split_frame_measured2) % 0x4000;
+
+	lx_printf("nyet: ss: %5u/%5u/%5u, ack: %5u/%5u, cs: %5u/%5u/%5u, nyet: %5u/%5u, cs-ss: %2u/%2u/%2u, retries: %u\n",
+	          hc->qh->start_split_frame,
+	          hc->qh->start_split_frame_measured,
+	          hc->qh->start_split_frame_measured2,
+	          ack_intr_core_frame,
+	          ack_intr_driver_frame,
+	          hc->qh->sched_frame,
+	          hc->qh->sched_frame_measured,
+	          hc->qh->sched_frame_measured2,
+	          nyet_intr_core_frame,
+	          nyet_intr_driver_frame,
+	          ssplit_csplit_diff,
+	          ssplit_csplit_measured_diff,
+	          ssplit_csplit_measured2_diff,
+	          qtd->csplit_retry_count);
+}
+#endif
+
 #if 0
 			int frnum = dwc_otg_hcd_get_frame_number(hcd);
 
@@ -1747,6 +1861,12 @@ static int32_t handle_hc_nyet_intr(dwc_otg_hcd_t * hcd,
 				 */
 				qtd->error_count++;
 #endif
+
+if ((hc->dev_addr == hid_dev_addr) && (hc->ep_num == 1)) {
+				/* start counting beginning with the first key press report */
+				if (xfercomp_count > 1)
+					nyet_error_count++;
+}
 				qtd->complete_split = 0;
 				halt_channel(hcd, hc, qtd,
 					     DWC_OTG_HC_XFER_XACT_ERR);

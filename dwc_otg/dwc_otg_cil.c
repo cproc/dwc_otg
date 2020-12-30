@@ -60,6 +60,12 @@
 #include "dwc_os.h"
 #include "dwc_otg_regs.h"
 #include "dwc_otg_cil.h"
+#include "dwc_otg_hcd.h"
+
+#include "dwc_otg_hcd.h"
+
+/* XXX: adapt to test board: rpi1b+: 4, rpi3b+: 4 or 5 */
+static const unsigned int hid_dev_addr = 4;
 
 extern bool cil_force_host;
 
@@ -2874,7 +2880,32 @@ void dwc_otg_hc_start_transfer(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 	/* Set host channel enable after all other setup is complete. */
 	hcchar.b.chen = 1;
 	hcchar.b.chdis = 0;
+
+#if 1
+/* log the frame number right before transfer start */
+{
+	hfnum_data_t hfnum;
+	hfnum.d32 = DWC_READ_REG32(&core_if->host_if->host_global_regs->hfnum);
+	int current_frame = hfnum.b.frnum;
+	hc->qh->sched_frame_measured = current_frame;
+	if (hc->do_split && !hc->complete_split)
+		hc->qh->start_split_frame_measured = current_frame;
+}
+#endif
+
 	DWC_WRITE_REG32(&hc_regs->hcchar, hcchar.d32);
+
+#if 1
+/* log the frame number right after transfer start */
+{
+	hfnum_data_t hfnum;
+	hfnum.d32 = DWC_READ_REG32(&core_if->host_if->host_global_regs->hfnum);
+	int current_frame = hfnum.b.frnum;
+	hc->qh->sched_frame_measured2 = current_frame;
+	if (hc->do_split && !hc->complete_split)
+		hc->qh->start_split_frame_measured2 = current_frame;
+}
+#endif
 
 	hc->xfer_started = 1;
 	hc->requests++;
