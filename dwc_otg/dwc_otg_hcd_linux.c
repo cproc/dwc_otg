@@ -123,10 +123,8 @@ extern int hub_status_data(struct usb_hcd *hcd, char *buf);
 extern int hub_control(struct usb_hcd *hcd,
 		       u16 typeReq,
 		       u16 wValue, u16 wIndex, char *buf, u16 wLength);
-
-struct wrapper_priv_data {
-	dwc_otg_hcd_t *dwc_otg_hcd;
-};
+static void dwc_otg_hcd_clear_tt_buffer_complete(struct usb_hcd *hcd,
+                                                 struct usb_host_endpoint *ep);
 
 /** @} */
 
@@ -156,23 +154,10 @@ static struct hc_driver dwc_otg_hc_driver = {
 
 	.hub_status_data = hub_status_data,
 	.hub_control = hub_control,
+	.clear_tt_buffer_complete = dwc_otg_hcd_clear_tt_buffer_complete,
 	//.bus_suspend =
 	//.bus_resume =
 };
-
-/** Gets the dwc_otg_hcd from a struct usb_hcd */
-static inline dwc_otg_hcd_t *hcd_to_dwc_otg_hcd(struct usb_hcd *hcd)
-{
-	struct wrapper_priv_data *p;
-	p = (struct wrapper_priv_data *)(hcd->hcd_priv);
-	return p->dwc_otg_hcd;
-}
-
-/** Gets the struct usb_hcd that contains a dwc_otg_hcd_t. */
-static inline struct usb_hcd *dwc_otg_hcd_to_hcd(dwc_otg_hcd_t * dwc_otg_hcd)
-{
-	return dwc_otg_hcd_get_priv_data(dwc_otg_hcd);
-}
 
 /** Gets the usb_host_endpoint associated with an URB. */
 inline struct usb_host_endpoint *dwc_urb_to_endpoint(struct urb *urb)
@@ -1069,6 +1054,27 @@ int hub_control(struct usb_hcd *hcd,
 	}
 
 	return retval;
+}
+
+/* Handles hub TT buffer clear completions */
+static void dwc_otg_hcd_clear_tt_buffer_complete(struct usb_hcd *hcd,
+                                                 struct usb_host_endpoint *ep)
+{
+	dwc_otg_hcd_t *dwc_hcd = hcd_to_dwc_otg_hcd(hcd);
+	dwc_otg_qh_t *qh;
+	unsigned long flags;
+
+	qh = ep->hcpriv;
+	if (!qh)
+		return;
+
+	DWC_SPINLOCK_IRQSAVE(dwc_hcd->lock, &flags);
+	qh->tt_buffer_dirty = 0;
+
+	if (dwc_hcd->flags.b.port_connect_status)
+		dwc_otg_hcd_queue_transactions(dwc_hcd, DWC_OTG_TRANSACTION_ALL);
+
+	DWC_SPINUNLOCK_IRQRESTORE(dwc_hcd->lock, flags);
 }
 
 #endif /* DWC_DEVICE_ONLY */

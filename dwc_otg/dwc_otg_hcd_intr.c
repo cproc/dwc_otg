@@ -36,6 +36,9 @@
 #include "dwc_otg_regs.h"
 
 #include <linux/jiffies.h>
+#include <linux/usb.h>
+#include <linux/usb/hcd.h>
+
 #ifdef CONFIG_ARM
 #include <asm/fiq.h>
 #endif
@@ -289,6 +292,43 @@ static inline void track_missed_sofs(uint16_t curr_frame_number)
 	last_frame_num = curr_frame_number;
 }
 #endif
+
+static void dwc_otg_hcd_handle_tt_clear(dwc_otg_hcd_t *hcd,
+                                        dwc_hc_t *hc,
+                                        dwc_otg_qtd_t *qtd)
+{
+	struct usb_device *root_hub = dwc_otg_hcd_to_hcd(hcd)->self.root_hub;
+	struct urb *usb_urb;
+
+	if (!hc->qh)
+		return;
+
+	if (hc->qh->dev_speed == USB_SPEED_HIGH)
+		return;
+
+	if (!qtd->urb)
+		return;
+
+	usb_urb = qtd->urb->priv;
+	if (!usb_urb || !usb_urb->dev || !usb_urb->dev->tt)
+		return;
+
+	/*
+	 * The root hub doesn't really have a TT, but Linux thinks it
+	 * does because how could you have a "high speed hub" that
+	 * directly talks directly to low speed devices without a TT?
+	 * It's all lies.  Lies, I tell you.
+	 */
+	if (usb_urb->dev->tt->hub == root_hub)
+		return;
+
+	if (qtd->urb->status != -EPIPE && qtd->urb->status != -EREMOTEIO) {
+		hc->qh->tt_buffer_dirty = 1;
+		if (usb_hub_clear_tt_buffer(usb_urb))
+			/* Clear failed; let's hope things work anyway */
+			hc->qh->tt_buffer_dirty = 0;
+	}
+}
 
 /**
  * Handles the start-of-frame interrupt in host mode. Non-periodic
@@ -1392,6 +1432,8 @@ static int32_t handle_hc_stall_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCD, "--Host Channel %d Interrupt: "
 		    "STALL Received--\n", hc->hc_num);
 
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
+
 	if (hcd->core_if->dma_desc_enable) {
 		dwc_otg_hcd_complete_xfer_ddma(hcd, hc, hc_regs, DWC_OTG_HC_XFER_STALL);
 		goto handle_stall_done;
@@ -1792,6 +1834,8 @@ static int32_t handle_hc_babble_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "Babble Error--\n", hc->hc_num);
 
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
+
 	if (hcd->core_if->dma_desc_enable) {
 		dwc_otg_hcd_complete_xfer_ddma(hcd, hc, hc_regs,
 					       DWC_OTG_HC_XFER_BABBLE_ERR);
@@ -1833,6 +1877,8 @@ static int32_t handle_hc_ahberr_intr(dwc_otg_hcd_t * hcd,
 
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "AHB Error--\n", hc->hc_num);
+
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
 
 	hcchar.d32 = DWC_READ_REG32(&hc_regs->hcchar);
 	hcsplt.d32 = DWC_READ_REG32(&hc_regs->hcsplt);
@@ -1926,6 +1972,8 @@ static int32_t handle_hc_xacterr_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "Transaction Error--\n", hc->hc_num);
 
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
+
 	if (hcd->core_if->dma_desc_enable) {
 		dwc_otg_hcd_complete_xfer_ddma(hcd, hc, hc_regs,
 					       DWC_OTG_HC_XFER_XACT_ERR);
@@ -1989,6 +2037,8 @@ static int32_t handle_hc_frmovrun_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		    "Frame Overrun--\n", hc->hc_num);
 
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
+
 	switch (dwc_otg_hcd_get_pipe_type(&qtd->urb->pipe_info)) {
 	case UE_CONTROL:
 	case UE_BULK:
@@ -2025,6 +2075,8 @@ static int32_t handle_hc_datatglerr_intr(dwc_otg_hcd_t * hcd,
 	DWC_DEBUGPL(DBG_HCDI, "--Host Channel %d Interrupt: "
 		"Data Toggle Error on %s transfer--\n",
 		hc->hc_num, (hc->ep_is_in ? "IN" : "OUT"));
+
+	dwc_otg_hcd_handle_tt_clear(hcd, hc, qtd);
 
 	/* Data toggles on split transactions cause the hc to halt.
 	 * restart transfer */

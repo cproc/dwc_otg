@@ -171,6 +171,8 @@ static void del_timers(dwc_otg_hcd_t * hcd)
 /**
  * Processes all the URBs in a single list of QHs. Completes them with
  * -ESHUTDOWN and frees the QTD.
+ *
+ * XXX: clear TT buffers if needed
  */
 static void kill_urbs_in_qh_list(dwc_otg_hcd_t * hcd, dwc_list_link_t * qh_list)
 {
@@ -209,6 +211,31 @@ static void kill_urbs_in_qh_list(dwc_otg_hcd_t * hcd, dwc_list_link_t * qh_list)
 			} else {
 				dwc_otg_hc_halt(hcd->core_if, qh->channel,
 						DWC_OTG_HC_XFER_URB_DEQUEUE);
+				dwc_hc_t *hc = qh->channel;
+				if (!hc->xfer_started) {
+					/* copied from 'release_channel()' */
+					dwc_otg_hc_cleanup(hcd->core_if, hc);
+					DWC_CIRCLEQ_INSERT_TAIL(&hcd->free_hc_list, hc, hc_list_entry);
+					if (!microframe_schedule) {
+						switch (hc->ep_type) {
+						case DWC_OTG_EP_TYPE_CONTROL:
+						case DWC_OTG_EP_TYPE_BULK:
+							hcd->non_periodic_channels--;
+							break;
+
+						default:
+							/*
+							 * Don't release reservations for periodic channels here.
+							 * That's done when a periodic transfer is descheduled (i.e.
+							 * when the QH is removed from the periodic schedule).
+							 */
+							break;
+						}
+					} else {
+						hcd->available_host_channels++;
+						fiq_print(FIQDBG_INT, hcd->fiq_state, "AHC = %d ", hcd->available_host_channels);
+					}
+				}
 			}
 			qh->channel = NULL;
 		}
@@ -618,9 +645,62 @@ int dwc_otg_hcd_urb_dequeue(dwc_otg_hcd_t * hcd,
 			} else {
 				dwc_otg_hc_halt(hcd->core_if, qh->channel,
 						DWC_OTG_HC_XFER_URB_DEQUEUE);
+
+				dwc_hc_t *hc = qh->channel;
+
+				if (hc->do_split) {
+					/*
+					 * Ideally this would be done in
+					 * 'dwc_otg_hcd_handle_hc_n_intr()',
+					 * but then the urb is already gone.
+					 *
+					 * It can happen that the clearing has already
+					 * been requested by an interrupt handler,
+					 * so a check is needed.
+					 */
+					if (!qh->tt_buffer_dirty) {
+						qh->tt_buffer_dirty = 1;
+						usb_hub_clear_tt_buffer(urb_qtd->urb->priv);
+					}
+				}
+
+				if (!hc->xfer_started) {
+					/* copied from 'release_channel()' */
+					dwc_otg_hc_cleanup(hcd->core_if, hc);
+					DWC_CIRCLEQ_INSERT_TAIL(&hcd->free_hc_list, hc, hc_list_entry);
+					if (!microframe_schedule) {
+						switch (hc->ep_type) {
+						case DWC_OTG_EP_TYPE_CONTROL:
+						case DWC_OTG_EP_TYPE_BULK:
+							hcd->non_periodic_channels--;
+							break;
+
+						default:
+							/*
+							 * Don't release reservations for periodic channels here.
+							 * That's done when a periodic transfer is descheduled (i.e.
+							 * when the QH is removed from the periodic schedule).
+							 */
+							break;
+						}
+					} else {
+						hcd->available_host_channels++;
+						fiq_print(FIQDBG_INT, hcd->fiq_state, "AHC = %d ", hcd->available_host_channels);
+					}
+				}
 			}
 		}
+	} else if (urb_qtd->in_process &&
+	           hcd->flags.b.port_connect_status &&
+	           urb_qtd->complete_split) {
+		/*
+		 * State between start-split and complete-split and no channel
+		 * assigned yet.
+		 */
+		qh->tt_buffer_dirty = 1;
+		usb_hub_clear_tt_buffer(urb_qtd->urb->priv);
 	}
+ 
 
 	/*
 	 * Free the QTD and clean up the associated QH. Leave the QH in the
@@ -670,6 +750,12 @@ int dwc_otg_hcd_endpoint_disable(dwc_otg_hcd_t * hcd, void *ep_handle,
 		DWC_SPINUNLOCK_IRQRESTORE(hcd->lock, flags);
 		retry--;
 		dwc_msleep(5);
+		DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
+	}
+
+	while (qh->tt_buffer_dirty) {
+		DWC_SPINUNLOCK_IRQRESTORE(hcd->lock, flags);
+		schedule_timeout_uninterruptible(1);
 		DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
 	}
 
@@ -2312,6 +2398,12 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 				fiq_fsm_queue_isoc_transaction(hcd, qh);
 		} else {
 
+			/* Make sure EP's TT buffer is clean before queueing qtds */
+			if (qh->tt_buffer_dirty) {
+				qh_ptr = qh_ptr->next;
+				continue;
+			}
+
 			/*
 			 * Set a flag if we're queueing high-bandwidth in slave mode.
 			 * The flag prevents any halts to get into the request queue in
@@ -2442,6 +2534,10 @@ static void process_non_periodic_channels(dwc_otg_hcd_t * hcd)
 		qh = DWC_LIST_ENTRY(hcd->non_periodic_qh_ptr, dwc_otg_qh_t,
 				    qh_list_entry);
 
+		/* Make sure EP's TT buffer is clean before queueing qtds */
+		if (qh->tt_buffer_dirty)
+			goto next;
+
 		if(fiq_fsm_enable && fiq_fsm_transaction_suitable(hcd, qh)) {
 			fiq_fsm_queue_split_transaction(hcd, qh);
 		} else {
@@ -2455,6 +2551,7 @@ static void process_non_periodic_channels(dwc_otg_hcd_t * hcd)
 				break;
 			}
 		}
+next:
 		/* Advance to next QH, skipping start-of-list entry. */
 		hcd->non_periodic_qh_ptr = hcd->non_periodic_qh_ptr->next;
 		if (hcd->non_periodic_qh_ptr == &hcd->non_periodic_sched_active) {

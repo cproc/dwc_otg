@@ -34,6 +34,9 @@
 #ifndef __DWC_HCD_H__
 #define __DWC_HCD_H__
 
+#include <linux/usb.h>
+#include <linux/usb/hcd.h>
+
 #include "dwc_otg_os_dep.h"
 #include "usb.h"
 #include "dwc_otg_hcd_if.h"
@@ -380,6 +383,8 @@ typedef struct dwc_otg_qh {
 	uint16_t frame_usecs[8];
 
 	uint32_t skip_count;
+
+	unsigned tt_buffer_dirty:1;
 } dwc_otg_qh_t;
 
 DWC_CIRCLEQ_HEAD(hc_list, dwc_hc);
@@ -622,6 +627,24 @@ struct dwc_otg_hcd {
 static inline struct device *dwc_otg_hcd_to_dev(struct dwc_otg_hcd *hcd)
 {
 	return &hcd->otg_dev->os_dep.platformdev->dev;
+}
+
+struct wrapper_priv_data {
+	dwc_otg_hcd_t *dwc_otg_hcd;
+};
+
+/** Gets the dwc_otg_hcd from a struct usb_hcd */
+static inline dwc_otg_hcd_t *hcd_to_dwc_otg_hcd(struct usb_hcd *hcd)
+{
+	struct wrapper_priv_data *p;
+	p = (struct wrapper_priv_data *)(hcd->hcd_priv);
+	return p->dwc_otg_hcd;
+}
+
+/** Gets the struct usb_hcd that contains a dwc_otg_hcd_t. */
+static inline struct usb_hcd *dwc_otg_hcd_to_hcd(dwc_otg_hcd_t * dwc_otg_hcd)
+{
+	return dwc_otg_hcd_get_priv_data(dwc_otg_hcd);
 }
 
 /** @name Transaction Execution Functions */
