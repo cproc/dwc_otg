@@ -2360,7 +2360,14 @@ void dwc_otg_hc_init(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 	hcchar.b.epnum = hc->ep_num;
 	hcchar.b.epdir = hc->ep_is_in;
 	hcchar.b.lspddev = (hc->speed == DWC_OTG_EP_SPEED_LOW);
-	hcchar.b.eptype = hc->ep_type;
+	/* Hack courtesy of FreeBSD: apparently forcing Interrupt Split transactions
+	 * as Control puts the transfer into the non-periodic request queue and the
+	 * non-periodic handler in the hub. Makes things lots easier.
+	 */
+	if (hc->do_split && (hc->ep_type == DWC_OTG_EP_TYPE_INTR))
+		hcchar.b.eptype = DWC_OTG_EP_TYPE_CONTROL;
+	else
+		hcchar.b.eptype = hc->ep_type;
 	hcchar.b.mps = hc->max_packet;
 
 	DWC_WRITE_REG32(&host_if->hc_regs[hc_num]->hcchar, hcchar.d32);
